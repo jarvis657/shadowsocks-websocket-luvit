@@ -69,56 +69,61 @@ upgrade = (req, connection) ->
       connection\pause! unless remote\write data
       return
     if stage == 0
-      addrtype = string.byte data, 1
-      if addrtype == 3
-        addrLen = string.byte data, 2
-      else unless addrtype == 1
-        p "unsupported addrtype: #{addrtype}"
-        connection\destroy!
-        return
-      -- read address and port
-      if addrtype == 1
-        remoteAddr = inetNtoa data\sub 2, 5
-        remotePort = (Buffer\new data\sub 6, 7)\readUInt16BE 1
-        headerLength = 7
-      else
-        remoteAddr = data\sub 3, 3 + addrLen - 1
-        remotePort = (Buffer\new data\sub 3 + addrLen, 3 + addrLen + 1)\readUInt16BE 1
-        headerLength = 2 + addrLen + 2
-      -- connect remote server
-      remote = net.create remotePort, remoteAddr, ->
-        p "connecting #{remoteAddr}:#{remotePort}"
+      xpcall (->
+          addrtype = string.byte data, 1
+          if addrtype == 3
+            addrLen = string.byte data, 2
+          else unless addrtype == 1
+            p "unsupported addrtype: #{addrtype}"
+            connection\destroy!
+            return
+          -- read address and port
+          if addrtype == 1
+            remoteAddr = inetNtoa data\sub 2, 5
+            remotePort = (Buffer\new data\sub 6, 7)\readUInt16BE 1
+            headerLength = 7
+          else
+            remoteAddr = data\sub 3, 3 + addrLen - 1
+            remotePort = (Buffer\new data\sub 3 + addrLen, 3 + addrLen + 1)\readUInt16BE 1
+            headerLength = 2 + addrLen + 2
+          -- connect remote server
+          remote = net.create remotePort, remoteAddr, ->
+            p "connecting #{remoteAddr}:#{remotePort}"
 
-        for i = 1, #cachedPieces
-          piece = cachedPieces[i]
-          remote\write piece
+            for i = 1, #cachedPieces
+              piece = cachedPieces[i]
+              remote\write piece
 
-        cachedPieces = nil -- save memory
-        stage = 5
+            cachedPieces = nil -- save memory
+            stage = 5
 
-      remote\on "data", (data) ->
-        data = encryptor\encrypt data
-        remote\pause! unless connection\write data
+          remote\on "data", (data) ->
+            data = encryptor\encrypt data
+            remote\pause! unless connection\write data
 
-      remote\on "end", ->
-        p "remote disconnected"
-        connection\done!
+          remote\on "end", ->
+            p "remote disconnected"
+            connection\done!
 
-      remote\on "error", (e)->
-        p "remote: #{e}"
-        connection\done!
+          remote\on "error", (e)->
+            p "remote: #{e}"
+            remote\destroy!
+            connection\done!
 
-      remote\on "drain", ->
-        connection\resume! if not connection.destroyed
+          remote\on "drain", ->
+            connection\resume! if not connection.destroyed
 
-      remote\setTimeout timeout, ->
-        connection\destroy!
-        remote\destroy!
+          remote\setTimeout timeout, ->
+            connection\destroy!
+            remote\destroy!
 
-      if (string.len data) > headerLength
-        cachedPieces[#cachedPieces + 1] = data\sub headerLength + 1
+          if (string.len data) > headerLength
+            cachedPieces[#cachedPieces + 1] = data\sub headerLength + 1
 
-      stage = 4
+          stage = 4),
+        (err) ->
+          p err
+
     else if stage == 4
       cachedPieces[#cachedPieces + 1] = data
       -- remote server not connected
@@ -131,6 +136,7 @@ upgrade = (req, connection) ->
 
   connection\on "error", (e)->
     p "server: #{e}"
+    connection\destroy!
     remote\destroy! if remote
 
   connection\on "drain", ->
@@ -147,6 +153,9 @@ server = http.createServer (req, res) ->
   res\writeHead 200, { ["Content-Type"]: "text/plain" }
   res\finish 'Good Day!'
 
-server\listen PORT, ->
-  address = server\address!
-  p "server listening at port #{address.address}:#{address.port}"
+xpcall (->
+    server\listen PORT, ->
+    address = server\address!
+    p "server listening at port #{address.address}:#{address.port}"),
+  (err) ->
+    p err

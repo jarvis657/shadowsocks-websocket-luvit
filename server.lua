@@ -96,61 +96,66 @@ upgrade = function(req, connection)
       return 
     end
     if stage == 0 then
-      local addrtype = string.byte(data, 1)
-      if addrtype == 3 then
-        addrLen = string.byte(data, 2)
-      else
-        if not (addrtype == 1) then
-          p("unsupported addrtype: " .. tostring(addrtype))
+      return xpcall((function()
+        local addrtype = string.byte(data, 1)
+        if addrtype == 3 then
+          addrLen = string.byte(data, 2)
+        else
+          if not (addrtype == 1) then
+            p("unsupported addrtype: " .. tostring(addrtype))
+            connection:destroy()
+            return 
+          end
+        end
+        if addrtype == 1 then
+          remoteAddr = inetNtoa(data:sub(2, 5))
+          remotePort = (Buffer:new(data:sub(6, 7))):readUInt16BE(1)
+          headerLength = 7
+        else
+          remoteAddr = data:sub(3, 3 + addrLen - 1)
+          remotePort = (Buffer:new(data:sub(3 + addrLen, 3 + addrLen + 1))):readUInt16BE(1)
+          headerLength = 2 + addrLen + 2
+        end
+        remote = net.create(remotePort, remoteAddr, function()
+          p("connecting " .. tostring(remoteAddr) .. ":" .. tostring(remotePort))
+          for i = 1, #cachedPieces do
+            local piece = cachedPieces[i]
+            remote:write(piece)
+          end
+          cachedPieces = nil
+          stage = 5
+        end)
+        remote:on("data", function(data)
+          data = encryptor:encrypt(data)
+          if not (connection:write(data)) then
+            return remote:pause()
+          end
+        end)
+        remote:on("end", function()
+          p("remote disconnected")
+          return connection:done()
+        end)
+        remote:on("error", function(e)
+          p("remote: " .. tostring(e))
+          remote:destroy()
+          return connection:done()
+        end)
+        remote:on("drain", function()
+          if not connection.destroyed then
+            return connection:resume()
+          end
+        end)
+        remote:setTimeout(timeout, function()
           connection:destroy()
-          return 
+          return remote:destroy()
+        end)
+        if (string.len(data)) > headerLength then
+          cachedPieces[#cachedPieces + 1] = data:sub(headerLength + 1)
         end
-      end
-      if addrtype == 1 then
-        remoteAddr = inetNtoa(data:sub(2, 5))
-        remotePort = (Buffer:new(data:sub(6, 7))):readUInt16BE(1)
-        headerLength = 7
-      else
-        remoteAddr = data:sub(3, 3 + addrLen - 1)
-        remotePort = (Buffer:new(data:sub(3 + addrLen, 3 + addrLen + 1))):readUInt16BE(1)
-        headerLength = 2 + addrLen + 2
-      end
-      remote = net.create(remotePort, remoteAddr, function()
-        p("connecting " .. tostring(remoteAddr) .. ":" .. tostring(remotePort))
-        for i = 1, #cachedPieces do
-          local piece = cachedPieces[i]
-          remote:write(piece)
-        end
-        cachedPieces = nil
-        stage = 5
+        stage = 4
+      end), function(err)
+        return p(err)
       end)
-      remote:on("data", function(data)
-        data = encryptor:encrypt(data)
-        if not (connection:write(data)) then
-          return remote:pause()
-        end
-      end)
-      remote:on("end", function()
-        p("remote disconnected")
-        return connection:done()
-      end)
-      remote:on("error", function(e)
-        p("remote: " .. tostring(e))
-        return connection:done()
-      end)
-      remote:on("drain", function()
-        if not connection.destroyed then
-          return connection:resume()
-        end
-      end)
-      remote:setTimeout(timeout, function()
-        connection:destroy()
-        return remote:destroy()
-      end)
-      if (string.len(data)) > headerLength then
-        cachedPieces[#cachedPieces + 1] = data:sub(headerLength + 1)
-      end
-      stage = 4
     else
       if stage == 4 then
         cachedPieces[#cachedPieces + 1] = data
@@ -165,6 +170,7 @@ upgrade = function(req, connection)
   end)
   connection:on("error", function(e)
     p("server: " .. tostring(e))
+    connection:destroy()
     if remote then
       return remote:destroy()
     end
@@ -191,7 +197,10 @@ local server = http.createServer(function(req, res)
   })
   return res:finish('Good Day!')
 end)
-return server:listen(PORT, function()
+return xpcall((function()
+  server:listen(PORT, function() end)
   local address = server:address()
   return p("server listening at port " .. tostring(address.address) .. ":" .. tostring(address.port))
+end), function(err)
+  return p(err)
 end)
